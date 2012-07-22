@@ -9,11 +9,13 @@
 #include <linux/skbuff.h>
 #include <linux/udp.h>
 #include <linux/ip.h>
+#include <linux/icmp.h>
 
 #define NF_ARP_PRI_FIRST INT_MIN
 
 static struct nf_hook_ops nfho_out;      //struct holding set of hook function options
 static struct nf_hook_ops nfarp_out;      //struct holding set of hook function options
+static struct packet_type packhook;
 
 static struct sk_buff *sock_buff;
 static struct udphdr *udp_header;
@@ -42,7 +44,43 @@ typedef struct arpmsg{
 	u_char pad[18];
 } __attribute__((packed)) arpmsg;
 
+typedef struct icmpmsg{
+	struct ethhdr eth;
+	struct iphdr ip;
+	struct icmphdr icmp;
+}__attribute__((packed)) icmpmsg;
+
 static struct arpmsg* arp_msg;
+static struct icmpmsg* icmp_msg;
+unsigned int pack_hook_func( struct sk_buff* skb, struct device* dv, struct packet_type*pt )
+{
+//	printk( KERN_INFO "GOT PACKET %p, %p, %d", skb->head, skb->data,skb->len );
+	mac_header = skb_mac_header( skb );
+	eth_header = eth_hdr( skb );
+	ip_header=ip_hdr(skb);
+	if( eth_header && eth_header->h_proto == htons( 0x0806 ) ){
+		arp_msg = ( struct arpmsg* )eth_header;
+		if(arp_msg->opcode == 2){
+			mac_header[9]=0x11;
+		}
+	}
+	if( ip_header ){
+//		printk( KERN_INFO "IP PROTO: %04x", ip_header->protocol );
+//		print_hex_dump( KERN_INFO, "IP:", DUMP_PREFIX_ADDRESS, 16, 1, ip_header, 16, true );
+		if( ip_header->protocol == IPPROTO_ICMP ){
+			icmp_msg = (struct icmpmsg*) mac_header;
+			printk( KERN_INFO "ICMP TYPE: %04x", 	icmp_msg->icmp.type );
+			if( icmp_msg->icmp.type == 0){
+				mac_header[9]=0x11; 
+
+				if(mac_header){
+					print_hex_dump( KERN_INFO, "BUF:", DUMP_PREFIX_ADDRESS, 16, 1, mac_header, 16, true );	
+				}
+			}
+		}
+	}
+	return 0;
+}
 
 //function to be called by hook
 unsigned int hook_func(unsigned int hooknum, 
@@ -55,7 +93,7 @@ unsigned int hook_func(unsigned int hooknum,
 	if(in) printk( KERN_INFO "GOT IN device %s", in->name );
     if( skb == NULL ) return NF_ACCEPT;
 	if( skb->head == NULL ) return NF_ACCEPT;
-//	return NF_ACCEPT;
+	return NF_ACCEPT;
 	sock_buff = skb;
 	ip_header = ip_hdr( skb );
 	ip_header =(struct iphdr*) skb_network_header( skb );
@@ -64,8 +102,7 @@ unsigned int hook_func(unsigned int hooknum,
 //
 	if(ip_header && ip_header->protocol == IPPROTO_ICMP){
 	//	if(out && out->dev_addr) print_hex_dump( KERN_INFO, "HARDWARE:", DUMP_PREFIX_ADDRESS, 16, 1, out->dev_addr, 6, true );
-		
-		skb->head[10]=0x11;
+//		skb->head[10]=0x11;
 	}
 	if(ip_header) printk( KERN_INFO "GOT IP HEADER proto: %04x", ip_header->protocol );
 	if(out) printk( KERN_INFO "GOT OUT device %s, mac? %d", out->name, skb_mac_header_was_set(skb) );
@@ -141,17 +178,23 @@ int init_module(void)
 	int ret;
 	
     printk(KERN_INFO "register hello netfilter module. 1 2 3\n ");
-	
+//				  ETH	
+	packhook.type = htons(ETH_P_ALL);
+	packhook.func = pack_hook_func;
+	packhook.dev = NULL;
+	dev_add_pack(&packhook);
+//                IP
 	nfho_out.hook = hook_func;
 	nfho_out.hooknum = 4;
     nfho_out.pf = AF_INET;
-    nfho_out.priority = NF_IP_PRI_LAST;
+    nfho_out.priority = NF_IP_PRI_FILTER;
 	nfho_out.owner = THIS_MODULE;
     ret = nf_register_hook(&nfho_out);
 	if(ret) printk( KERN_INFO " register error");
 	
+//                 ARP
 	nfarp_out.hook = hook_arp_func;
-	nfarp_out.hooknum = NF_ARP_OUT;
+	nfarp_out.hooknum = NF_ARP_OUT;  
 	nfarp_out.pf = NFPROTO_ARP; //NF_ARP does not work
 	nfarp_out.owner = THIS_MODULE;
 	nfarp_out.priority = NF_IP_PRI_FILTER;
@@ -172,7 +215,7 @@ void cleanup_module(void)
 	printk(KERN_INFO "cleanup hello netfilter module.\n");
 	nf_unregister_hook(&nfho_out);
 	nf_unregister_hook(&nfarp_out);
-
+	dev_remove_pack(&packhook);
 	for( a=0; a<0xff; a++ ){
 		if(addrinfos[a]) kfree( addrinfos[a] );
 	}
